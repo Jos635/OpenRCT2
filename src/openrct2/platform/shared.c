@@ -397,6 +397,9 @@ void platform_process_messages()
 			sint32 x = (sint32)(e.tfinger.x * gScreenWidth);
 			sint32 y = (sint32)(e.tfinger.y * gScreenHeight);
 
+			gCursorState.x = x;
+			gCursorState.y = y;
+
 			gCursorState.touchIsDouble = (!gCursorState.touchIsDouble
 				&& e.tfinger.timestamp - gCursorState.touchDownTimestamp < TOUCH_DOUBLE_TIMEOUT);
 

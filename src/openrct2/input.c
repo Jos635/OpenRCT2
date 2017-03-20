@@ -64,6 +64,9 @@ uint8 gInputPlaceObjectModifier;
 
 sint32 gInputDragLastX;
 sint32 gInputDragLastY;
+sint32 gInputDragStartX;
+sint32 gInputDragStartY;
+#define MIN_TOUCH_DRAG 8
 
 widget_ref gHoverWidget;
 widget_ref gPressedWidget;
@@ -101,9 +104,9 @@ static void input_window_position_end(rct_window *w, sint32 x, sint32 y);
 static void input_window_resize_begin(rct_window *w, sint32 widgetIndex, sint32 x, sint32 y);
 static void input_window_resize_continue(rct_window *w, sint32 x, sint32 y);
 static void input_window_resize_end();
-static void input_viewport_drag_begin(rct_window *w, sint32 x, sint32 y);
-static void input_viewport_drag_continue();
-static void input_viewport_drag_end();
+static void input_viewport_drag_begin(rct_window *w, sint32 x, sint32 y, bool touch);
+static void input_viewport_drag_continue(sint32 newDragX, sint32 newDragY, bool touch);
+static void input_viewport_drag_end(bool touch);
 static void input_scroll_begin(rct_window *w, sint32 widgetIndex, sint32 x, sint32 y);
 static void input_scroll_continue(rct_window *w, sint32 widgetIndex, sint32 state, sint32 x, sint32 y);
 static void input_scroll_end();
@@ -309,7 +312,7 @@ static void game_handle_input_mouse(sint32 x, sint32 y, sint32 state)
 				switch (widget->type) {
 				case WWT_VIEWPORT:
 					if (!(gScreenFlags & (SCREEN_FLAGS_TRACK_MANAGER | SCREEN_FLAGS_TITLE_DEMO))) {
-						input_viewport_drag_begin(w, x, y);
+						input_viewport_drag_begin(w, x, y, false);
 					}
 					break;
 				case WWT_SCROLL:
@@ -336,9 +339,9 @@ static void game_handle_input_mouse(sint32 x, sint32 y, sint32 state)
 		break;
 	case INPUT_STATE_VIEWPORT_RIGHT:
 		if (state == MOUSE_STATE_RELEASED) {
-			input_viewport_drag_continue();
+			input_viewport_drag_continue(x, y, false);
 		} else if (state == MOUSE_STATE_RIGHT_RELEASE) {
-			input_viewport_drag_end();
+			input_viewport_drag_end(false);
 			if (_ticksSinceDragStart < 500) {
 				// If the user pressed the right mouse button for less than 500 ticks, interpret as right click
 				viewport_interaction_right_click(x, y);
@@ -354,6 +357,12 @@ static void game_handle_input_mouse(sint32 x, sint32 y, sint32 state)
 			_inputState = INPUT_STATE_RESET;
 			break;
 		}
+
+        if (gCursorState.touch) {
+			// x, y are not correct at this point for some reason
+            input_viewport_drag_begin(w, x, y, true);
+            break;
+        }
 
 		switch (state) {
 		case MOUSE_STATE_RELEASED:
@@ -397,6 +406,25 @@ static void game_handle_input_mouse(sint32 x, sint32 y, sint32 state)
 			break;
 		}
 		break;
+    case INPUT_STATE_VIEWPORT_TOUCH_DRAG:
+        if (state == MOUSE_STATE_RELEASED) {
+            input_viewport_drag_continue(x, y, true);
+        } else if(state == MOUSE_STATE_RIGHT_RELEASE || state == MOUSE_STATE_LEFT_RELEASE) {
+            input_viewport_drag_end(true);
+
+            sint32 moved = abs(gInputDragLastX - gInputDragStartX) +
+                            abs(gInputDragLastY - gInputDragStartY);
+            moved *= gConfigGeneral.window_scale;
+            if (moved < MIN_TOUCH_DRAG) {
+                _inputState = INPUT_STATE_VIEWPORT_LEFT;
+                if (state == MOUSE_STATE_RIGHT_PRESS) {
+                    viewport_interaction_right_click(x, y);
+                } else {
+                    viewport_interaction_left_click(x, y);
+                }
+            }
+        }
+        break;
 	case INPUT_STATE_SCROLL_LEFT:
 		switch (state) {
 		case MOUSE_STATE_RELEASED:
@@ -494,26 +522,34 @@ static void input_window_resize_end()
 
 #pragma region Viewport dragging
 
-static void input_viewport_drag_begin(rct_window *w, sint32 x, sint32 y)
+static void input_viewport_drag_begin(rct_window *w, sint32 x, sint32 y, bool touch)
 {
 	w->flags &= ~WF_SCROLLING_TO_LOCATION;
-	_inputState = INPUT_STATE_VIEWPORT_RIGHT;
+	_inputState = touch ? INPUT_STATE_VIEWPORT_TOUCH_DRAG : INPUT_STATE_VIEWPORT_RIGHT;
 	_dragWidget.window_classification = w->classification;
 	_dragWidget.window_number = w->number;
 	_ticksSinceDragStart = 0;
-	platform_get_cursor_position(&gInputDragLastX, &gInputDragLastY);
+	if (!touch) {
+        platform_get_cursor_position(&gInputDragLastX, &gInputDragLastY);
+    } else {
+        gInputDragLastX = x;
+        gInputDragLastY = y;
+    }
+
+    gInputDragStartX = gInputDragLastX;
+    gInputDragStartY = gInputDragLastY;
 	platform_hide_cursor();
 
 	// gInputFlags |= INPUT_FLAG_5;
 }
 
-static void input_viewport_drag_continue()
+static void input_viewport_drag_continue(sint32 newDragX, sint32 newDragY, bool touch)
 {
-	sint32 dx, dy, newDragX, newDragY;
+	sint32 dx, dy;
 	rct_window *w;
 	rct_viewport *viewport;
 
-	platform_get_cursor_position(&newDragX, &newDragY);
+	if (!touch) platform_get_cursor_position(&newDragX, &newDragY);
 
 	dx = newDragX - gInputDragLastX;
 	dy = newDragY - gInputDragLastY;
@@ -522,7 +558,7 @@ static void input_viewport_drag_continue()
 	// #3294: Window can be closed during a drag session, so just finish
 	//        the session if the window no longer exists
 	if (w == NULL) {
-		input_viewport_drag_end();
+		input_viewport_drag_end(touch);
 		return;
 	}
 
@@ -539,9 +575,9 @@ static void input_viewport_drag_continue()
 			// As the user moved the mouse, don't interpret it as right click in any case.
 			_ticksSinceDragStart = 1000;
 
-			dx *= 1 << (viewport->zoom + 1);
-			dy *= 1 << (viewport->zoom + 1);
-			if (gConfigGeneral.invert_viewport_drag){
+			dx *= 1 << (viewport->zoom + !touch);
+			dy *= 1 << (viewport->zoom + !touch);
+			if (gConfigGeneral.invert_viewport_drag || touch) {
 				w->saved_view_x -= dx;
 				w->saved_view_y -= dy;
 			} else {
@@ -551,10 +587,15 @@ static void input_viewport_drag_continue()
 		}
 	}
 
-	platform_set_cursor_position(gInputDragLastX, gInputDragLastY);
+    if (!touch) {
+        platform_set_cursor_position(gInputDragLastX, gInputDragLastY);
+    } else {
+        gInputDragLastX = newDragX;
+        gInputDragLastY = newDragY;
+    }
 }
 
-static void input_viewport_drag_end()
+static void input_viewport_drag_end(bool touch)
 {
 	_inputState = INPUT_STATE_RESET;
 	platform_show_cursor();
